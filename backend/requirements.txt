@@ -1,0 +1,8 @@
+torch
+torchvision
+monai
+numpy
+aiokafka
+fastapi
+uvicorn
+pyyaml

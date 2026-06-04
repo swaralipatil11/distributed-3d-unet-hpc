@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D MRI Volumetric Segmentation Pipeline</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <!-- Main Stylesheet -->
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="background-glow"></div>
+    
+    <header class="app-header">
+        <div class="logo">
+            <span class="icon">🧠</span>
+            <h1>3D MRI Volumetric Inference Pipeline</h1>
+        </div>
+        <div id="connection-badge" class="badge disconnected">Disconnected</div>
+    </header>
+
+    <main class="app-layout">
+        <!-- Left Column: Controls & Ingestion -->
+        <section class="left-panel">
+            <!-- Control Card -->
+            <div class="card glass">
+                <h2>Control Panel</h2>
+                <div class="control-group">
+                    <button id="btn-simulate" class="btn btn-primary">⚡ Simulate Hospital Scan Stream</button>
+                </div>
+                
+                <div class="control-group margin-top">
+                    <label for="select-volume">Processed Volumes:</label>
+                    <select id="select-volume" class="form-select">
+                        <option value="">-- No Volumes Processed --</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Ingestion Progress Card -->
+            <div class="card glass">
+                <h2>Live Ingestion Progress</h2>
+                <div class="progress-container">
+                    <div class="progress-details">
+                        <span id="ingest-status">Waiting for scanning data stream...</span>
+                        <span id="ingest-percent">0%</span>
+                    </div>
+                    <div class="progress-bar-bg">
+                        <div id="ingest-progress-bar" class="progress-bar-fill" style="width: 0%"></div>
+                    </div>
+                </div>
+                
+                <!-- Terminal Console -->
+                <div class="console-wrapper">
+                    <h3>Streaming Logs Terminal</h3>
+                    <div id="console-logs" class="console">
+                        <div class="log-line system">[SYSTEM] Ready to ingest 3D volume slices...</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Right Column: Visualization & Stats -->
+        <section class="right-panel">
+            <!-- Visualizer Card -->
+            <div class="card glass visualizer-card">
+                <h2>3D Voxel Slice Viewer</h2>
+                <div class="visualizer-container">
+                    <!-- Slice Layers Stack -->
+                    <div class="slice-viewport">
+                        <div class="slice-layers">
+                            <!-- Base Gray MRI Scan -->
+                            <img id="mri-slice" src="" alt="MRI Slice Base" class="slice-image placeholder" style="display: none;">
+                            <!-- Segmentation Class Overlay -->
+                            <img id="label-slice" src="" alt="Segmentation Overlay" class="slice-image label-overlay" style="display: none;">
+                            <!-- Visualizer Placeholder Loader -->
+                            <div id="viewer-placeholder" class="viewer-loader">
+                                <span class="loader-spinner"></span>
+                                <p>Select or simulate a volume to view 3D slices</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Visualizer Settings -->
+                    <div class="visualizer-settings">
+                        <div class="setting-row">
+                            <label for="select-modality">MRI Modality:</label>
+                            <select id="select-modality" class="form-select" disabled>
+                                <option value="0">FLAIR (Modality 0)</option>
+                                <option value="1">T1w (Modality 1)</option>
+                                <option value="2">t1gd / T1c (Modality 2)</option>
+                                <option value="3">T2w (Modality 3)</option>
+                            </select>
+                        </div>
+
+                        <div class="setting-row">
+                            <div class="slider-header">
+                                <label for="slider-slice">Slice Depth (Z-Axis):</label>
+                                <span id="slice-val">0 / 127</span>
+                            </div>
+                            <input type="range" id="slider-slice" min="0" max="127" value="64" class="form-range" disabled>
+                        </div>
+
+                        <div class="setting-row">
+                            <div class="slider-header">
+                                <label for="slider-opacity">Overlay Opacity:</label>
+                                <span id="opacity-val">70%</span>
+                            </div>
+                            <input type="range" id="slider-opacity" min="0" max="100" value="70" class="form-range" disabled>
+                        </div>
+
+                        <!-- Legend -->
+                        <div class="segmentation-legend">
+                            <h3>Segmentation Classes:</h3>
+                            <div class="legend-items">
+                                <div class="legend-item"><span class="color-box edema"></span> Edema (Class 1)</div>
+                                <div class="legend-item"><span class="color-box non-enhancing"></span> Non-enhancing (Class 2)</div>
+                                <div class="legend-item"><span class="color-box enhancing"></span> Enhancing (Class 3)</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Performance Metrics Card -->
+            <div class="card glass">
+                <h2>Distributed Worker Latency</h2>
+                <div class="stats-grid">
+                    <div class="stat-box">
+                        <span class="label">Voxel Interpolation</span>
+                        <span id="metric-resize" class="value">0.000s</span>
+                    </div>
+                    <div class="stat-box">
+                        <span class="label">JIT Inference Pass</span>
+                        <span id="metric-inference" class="value">0.000s</span>
+                    </div>
+                    <div class="stat-boxHighlight">
+                        <span class="label">End-to-End Latency</span>
+                        <span id="metric-latency" class="value">0.00s</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="app-footer">
+        <p>3D Volumetric Segmentation Worker Engine | Powered by PyTorch & MONAI</p>
+    </footer>
+
+    <!-- App JavaScript -->
+    <script src="/static/app.js"></script>
+</body>
+</html>
