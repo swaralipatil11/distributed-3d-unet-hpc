@@ -6,3 +6,5 @@ aiokafka
 fastapi
 uvicorn
 pyyaml
+nibabel
+Pillow

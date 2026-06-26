@@ -90,6 +90,7 @@ def load_and_slice_volume(volume_path: str) -> List[Dict[str, Any]]:
             "dtype": "float32",
             "data": b64_data,
             "timestamp": time.time(),
+            "affine": img.affine.tolist(),
         }
         packets.append(packet)
         

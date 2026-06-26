@@ -1,3 +1,9 @@
+// Dynamic host resolution for API and WebSockets
+// Allows local dev servers (e.g. Vite on port 5173) to communicate with FastAPI backend on port 8000
+const isDevServer = window.location.hostname === "localhost" && window.location.port !== "8000" && window.location.port !== "";
+const apiBase = isDevServer ? "http://localhost:8000" : "";
+const wsHost = isDevServer ? "localhost:8000" : window.location.host;
+
 // State variables
 let socket = null;
 let currentVolumeId = "";
@@ -98,7 +104,7 @@ function logToTerminal(message, type = "packet") {
 // Connect WebSocket for real-time progress updates
 function connectWebSocket() {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    const wsUrl = `${protocol}//${wsHost}/ws`;
     
     logToTerminal(`Connecting to WebSocket server...`, "system");
     socket = new WebSocket(wsUrl);
@@ -183,7 +189,7 @@ async function triggerSimulation() {
     logToTerminal("Simulating raw medical scan stream from scan machine...", "system");
     
     try {
-        const response = await fetch("/api/simulate", { method: "POST" });
+        const response = await fetch(`${apiBase}/api/simulate`, { method: "POST" });
         const data = await response.json();
         if (data.status === "started") {
             logToTerminal(`Simulation started: streaming slices for scan volume.`, "system");
@@ -200,7 +206,7 @@ async function triggerSimulation() {
 // Load List of processed volumes from API
 async function loadVolumeList(selectedVolumeId = "") {
     try {
-        const response = await fetch("/api/volumes");
+        const response = await fetch(`${apiBase}/api/volumes`);
         const volumes = await response.json();
         
         selectVolume.innerHTML = "";
@@ -274,8 +280,8 @@ function updateSliceImages() {
     if (!currentVolumeId) return;
     
     // Update labels and MRI image sources
-    const mriSrc = `/api/volume/${currentVolumeId}/slice/${currentSliceIdx}/modality/${currentModalityIdx}?t=${Date.now()}`;
-    const labelSrc = `/api/volume/${currentVolumeId}/slice/${currentSliceIdx}/label?t=${Date.now()}`;
+    const mriSrc = `${apiBase}/api/volume/${currentVolumeId}/slice/${currentSliceIdx}/modality/${currentModalityIdx}?t=${Date.now()}`;
+    const labelSrc = `${apiBase}/api/volume/${currentVolumeId}/slice/${currentSliceIdx}/label?t=${Date.now()}`;
     
     mriSlice.src = mriSrc;
     labelSlice.src = labelSrc;

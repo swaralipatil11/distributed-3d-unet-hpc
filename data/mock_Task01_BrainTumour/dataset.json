@@ -1,0 +1,29 @@
+{
+    "name": "Task01_BrainTumour",
+    "description": "Mock Brain Tumour Segmentation Dataset",
+    "reference": "Mock",
+    "licence": "CC-BY-SA 4.0",
+    "release": "1.0 15/01/2018",
+    "tensorImageSize": "4D",
+    "modality": {
+        "0": "T1",
+        "1": "T1c",
+        "2": "T2",
+        "3": "FLAIR"
+    },
+    "labels": {
+        "0": "background",
+        "1": "edema",
+        "2": "non-enhancing tumor",
+        "3": "enhancing tumor"
+    },
+    "numTraining": 1,
+    "numTest": 0,
+    "training": [
+        {
+            "image": "./imagesTr/BRATS_001.nii.gz",
+            "label": "./labelsTr/BRATS_001.nii.gz"
+        }
+    ],
+    "test": []
+}

@@ -9,11 +9,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
+# Create virtual environment
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
 # Copy only the requirements to cache dependency layer
 COPY requirements.txt .
 
-# Install dependencies to user local directory to preserve caching
-RUN pip install --no-cache-dir --user -r requirements.txt
+# Install dependencies to virtual environment
+RUN pip install --no-cache-dir -r requirements.txt
 
 
 # Stage 2: Final lightweight execution environment with official CUDA support
@@ -33,10 +37,10 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
     && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
 
 # Copy dependencies from builder stage
-COPY --from=builder /root/.local /root/.local
+COPY --from=builder /opt/venv /opt/venv
 
 # Set environment path to expose installed wheels (uvicorn, torch, monai, etc)
-ENV PATH=/root/.local/bin:$PATH
+ENV PATH="/opt/venv/bin:$PATH"
 ENV PYTHONPATH=/app:$PATH
 
 # Copy src and deploy assets

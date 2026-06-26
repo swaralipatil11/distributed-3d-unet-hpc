@@ -35,14 +35,82 @@ logging.basicConfig(
 )
 logger = logging.getLogger("worker_engine")
 
+from fastapi.middleware.cors import CORSMiddleware
+import monai.transforms as mt
+
 # FastAPI App
 app = FastAPI(title="3D MRI Volumetric Inference Worker", version="1.0.0")
+
+# Add CORS Middleware to support decoupled frontends (e.g. Vite on port 5173)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Global variables
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model: torch.jit.ScriptModule = None
-volume_cache: Dict[str, Dict[int, np.ndarray]] = {}
+volume_cache: Dict[str, List[Any]] = {} # Maps volume_id -> list of slices
 volume_metadata: Dict[str, Dict[str, Any]] = {}
+
+# Simple cache for processed volumes to avoid loading/decompressing files on every slice request
+# Stores volume_id -> {"image": np.ndarray, "label": np.ndarray, "timestamp": float}
+processed_volume_cache: Dict[str, Dict[str, Any]] = {}
+PROCESSED_CACHE_LIMIT = 5 # Cache up to 5 volumes in memory
+
+def get_processed_volume(volume_id: str) -> Dict[str, Any]:
+    global processed_volume_cache
+    
+    # If already cached, update timestamp and return
+    if volume_id in processed_volume_cache:
+        processed_volume_cache[volume_id]["timestamp"] = time.time()
+        return processed_volume_cache[volume_id]
+        
+    results_path = Path(f"./data/results/{volume_id}.npz")
+    if not results_path.exists():
+        raise FileNotFoundError(f"Volume results not found for {volume_id}")
+        
+    archive = np.load(results_path)
+    image = archive["image"]
+    label = archive["label"]
+    
+    # Evict oldest if limit reached
+    if len(processed_volume_cache) >= PROCESSED_CACHE_LIMIT:
+        oldest_key = min(processed_volume_cache.keys(), key=lambda k: processed_volume_cache[k]["timestamp"])
+        del processed_volume_cache[oldest_key]
+        logger.info(f"Evicted volume {oldest_key} from processed cache.")
+        
+    processed_volume_cache[volume_id] = {
+        "image": image,
+        "label": label,
+        "timestamp": time.time()
+    }
+    return processed_volume_cache[volume_id]
+
+
+async def cleanup_cache_loop():
+    """
+    Background task that runs periodically to remove stale volumes
+    from the in-memory cache to prevent memory leaks.
+    """
+    while True:
+        await asyncio.sleep(60)
+        now = time.time()
+        stale_threshold = 300 # 5 minutes
+        stale_volumes = []
+        for volume_id, meta in list(volume_metadata.items()):
+            if now - meta.get("start_time", now) > stale_threshold:
+                stale_volumes.append(volume_id)
+                
+        for volume_id in stale_volumes:
+            logger.info(f"Cleaning up stale cache for volume {volume_id} to prevent memory leak.")
+            if volume_id in volume_cache:
+                del volume_cache[volume_id]
+            if volume_id in volume_metadata:
+                del volume_metadata[volume_id]
 
 
 # WebSocket Connection Manager
@@ -82,6 +150,14 @@ async def startup_event():
     # Ensure folders exist
     Path("./data/results").mkdir(parents=True, exist_ok=True)
     
+    # Start the Kafka consumer background task
+    bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+    topic = os.getenv("KAFKA_TOPIC", "mri-inference-requests")
+    asyncio.create_task(consume_kafka_loop(bootstrap_servers, topic))
+    
+    # Start cache cleanup task
+    asyncio.create_task(cleanup_cache_loop())
+    
     model_path = "./deploy/model_trace.pt"
     logger.info(f"Loading compiled TorchScript model from {model_path} onto {device}...")
     
@@ -97,11 +173,6 @@ async def startup_event():
     except Exception as e:
         logger.error(f"Failed to load TorchScript model: {e}")
         return
-        
-    # Start the Kafka consumer background task
-    bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-    topic = os.getenv("KAFKA_TOPIC", "mri-inference-requests")
-    asyncio.create_task(consume_kafka_loop(bootstrap_servers, topic))
 
 
 # WebSocket endpoint
@@ -152,13 +223,9 @@ async def list_volumes():
 # API: Get MRI modality slice as PNG image
 @app.get("/api/volume/{volume_id}/slice/{slice_idx}/modality/{modality_idx}")
 async def get_slice_modality(volume_id: str, slice_idx: int, modality_idx: int):
-    results_path = Path(f"./data/results/{volume_id}.npz")
-    if not results_path.exists():
-        return Response(status_code=status.HTTP_404_NOT_FOUND)
-        
     try:
-        archive = np.load(results_path)
-        image = archive["image"] # Shape (4, 128, 128, 128)
+        volume = get_processed_volume(volume_id)
+        image = volume["image"] # Shape (4, 128, 128, 128)
         
         # Extract 2D slice
         slice_data = image[modality_idx, :, :, slice_idx]
@@ -180,6 +247,8 @@ async def get_slice_modality(volume_id: str, slice_idx: int, modality_idx: int):
         img.save(buf, format="PNG")
         buf.seek(0)
         return StreamingResponse(buf, media_type="image/png")
+    except FileNotFoundError:
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         logger.error(f"Error serving slice modality: {e}")
         return Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -188,13 +257,9 @@ async def get_slice_modality(volume_id: str, slice_idx: int, modality_idx: int):
 # API: Get color-coded transparency PNG for segmentation label
 @app.get("/api/volume/{volume_id}/slice/{slice_idx}/label")
 async def get_slice_label(volume_id: str, slice_idx: int):
-    results_path = Path(f"./data/results/{volume_id}.npz")
-    if not results_path.exists():
-        return Response(status_code=status.HTTP_404_NOT_FOUND)
-        
     try:
-        archive = np.load(results_path)
-        label = archive["label"] # Shape (128, 128, 128)
+        volume = get_processed_volume(volume_id)
+        label = volume["label"] # Shape (128, 128, 128)
         
         # Extract 2D slice
         slice_label = label[:, :, slice_idx]
@@ -217,6 +282,8 @@ async def get_slice_label(volume_id: str, slice_idx: int):
         img.save(buf, format="PNG")
         buf.seek(0)
         return StreamingResponse(buf, media_type="image/png")
+    except FileNotFoundError:
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         logger.error(f"Error serving slice label: {e}")
         return Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -294,16 +361,22 @@ async def process_slice_payload(payload: Dict[str, Any]):
     slice_array = np.frombuffer(raw_bytes, dtype=np.float32).reshape(slice_shape)
     
     if volume_id not in volume_cache:
-        volume_cache[volume_id] = {}
+        volume_cache[volume_id] = [None] * total_packets
         volume_metadata[volume_id] = {
             "start_time": time.time(),
             "slice_shape": slice_shape,
+            "received_count": 0,
+            "affine": payload.get("affine"),
         }
         
-    volume_cache[volume_id][packet_idx] = slice_array
-    
+    # Guard against out-of-bounds packet_idx and duplicate packets
+    if 0 <= packet_idx < total_packets:
+        if volume_cache[volume_id][packet_idx] is None:
+            volume_cache[volume_id][packet_idx] = slice_array
+            volume_metadata[volume_id]["received_count"] += 1
+            
     # If complete, run inference
-    if len(volume_cache[volume_id]) == total_packets:
+    if volume_metadata[volume_id]["received_count"] == total_packets:
         await manager.broadcast({"type": "reassembly_started", "volume_id": volume_id})
         # Execute reassembly and inference asynchronously to avoid blocking the network stream
         asyncio.create_task(reassemble_and_infer(volume_id, total_packets))
@@ -322,29 +395,66 @@ async def reassemble_and_infer(volume_id: str, total_packets: int):
     await manager.broadcast({"type": "inference_started", "volume_id": volume_id})
     
     # Retrieve slices in sequential order
-    slices = [volume_cache[volume_id][i] for i in range(total_packets)]
+    slices = volume_cache[volume_id]
     
     # Stack slices along z-axis (axial plane dimension 2)
     # Stacked shape (H, W, Z, C) -> (240, 240, Z, 4)
     full_array = np.stack(slices, axis=2)
     
-    # Permute to PyTorch shape (C, H, W, Z) -> (4, 240, 240, Z)
-    # Add batch dimension -> (1, 4, 240, 240, Z)
-    tensor = torch.from_numpy(full_array).float()
-    tensor = tensor.permute(3, 0, 1, 2).unsqueeze(0)
+    # Get affine matrix from metadata
+    affine_list = metadata.get("affine")
+    if affine_list is not None:
+        affine = np.array(affine_list)
+    else:
+        affine = np.eye(4)
+        
+    # Transpose to shape (C, H, W, Z) for MONAI channel-first orientation/spacing transforms
+    data_array = np.transpose(full_array, (3, 0, 1, 2))
     
-    # Move to execution device
+    # Wrap in MetaTensor to carry the spatial affine matrix consistently
+    from monai.data import MetaTensor
+    meta_tensor = MetaTensor(data_array, affine=affine)
+    
+    # Standardize orientation to RAS and spacing to 1.0mm isotropic resolution
+    try:
+        orient = mt.Orientation(axcodes="RAS")
+        spacing = mt.Spacing(pixdim=(1.0, 1.0, 1.0), mode="bilinear")
+        meta_tensor = orient(meta_tensor)
+        meta_tensor = spacing(meta_tensor)
+    except Exception as e:
+        logger.warning(f"Could not apply orientation/spacing standardisation: {e}")
+        
+    # Apply intensity normalization (channel-wise, non-zero voxels)
+    try:
+        normalizer = mt.NormalizeIntensity(nonzero=True, channel_wise=True)
+        meta_tensor = normalizer(meta_tensor)
+    except Exception as e:
+        logger.warning(f"Could not apply intensity normalization: {e}")
+        
+    # Convert to pure torch tensor shape (1, C, H, W, Z)
+    if hasattr(meta_tensor, "as_tensor"):
+        pure_tensor = meta_tensor.as_tensor()
+    else:
+        pure_tensor = torch.as_tensor(meta_tensor)
+        
+    tensor = pure_tensor.float().unsqueeze(0)
     tensor = tensor.to(device)
     
-    # Perform trilinear interpolation to resize to target input shape (1, 4, 128, 128, 128)
+    # Perform resizing/interpolation using MONAI Resize to standard input shape (1, 4, 128, 128, 128)
     resize_start = time.time()
-    with torch.no_grad():
-        input_tensor = F.interpolate(
-            tensor,
-            size=(128, 128, 128),
-            mode="trilinear",
-            align_corners=False
-        )
+    try:
+        resize = mt.Resize(spatial_size=(128, 128, 128), mode="trilinear")
+        with torch.no_grad():
+            input_tensor = resize(tensor.squeeze(0)).unsqueeze(0)
+    except Exception as e:
+        logger.error(f"Resize failed: {e}. Falling back to default F.interpolate.")
+        with torch.no_grad():
+            input_tensor = F.interpolate(
+                tensor,
+                size=(128, 128, 128),
+                mode="trilinear",
+                align_corners=False
+            )
     resize_time = time.time() - resize_start
     
     # Run TorchScript engine inference
@@ -449,12 +559,18 @@ async def consume_kafka_loop(bootstrap_servers: str, topic: str):
 
 # Mount static files folder pointing to the frontend directory
 frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend"
-app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")
-
-# Route root endpoint to serve UI index.html
-@app.get("/")
-async def read_index():
-    return FileResponse(str(frontend_dir / "index.html"))
+if not frontend_dir.exists():
+    frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
+    
+if frontend_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")
+    
+    # Route root endpoint to serve UI index.html
+    @app.get("/")
+    async def read_index():
+        return FileResponse(str(frontend_dir / "index.html"))
+else:
+    logger.warning("Frontend directory not found at any fallback location. Static files and root UI endpoint are disabled.")
 
 
 async def run_simulation_harness():
