@@ -100,6 +100,7 @@ To trigger scan streaming over Kafka:
   python -m src.producer
   ```
 - Or click the **⚡ Simulate Hospital Scan Stream** button directly in the web UI dashboard at `http://localhost:8000`.
+- *Note: If developing the frontend on a decoupled port (e.g. Vite running on `http://localhost:5173`), the telemetry dashboard automatically routes WebSocket and API traffic to the FastAPI backend running on port 8000.*
 
 ---
 
@@ -107,4 +108,6 @@ To trigger scan streaming over Kafka:
 
 - **Automatic Mixed Precision (AMP)**: The training runner (`backend/src/train.py`) utilizes PyTorch's native `GradScaler` and `autocast` to execute training in FP16 on GPU. This reduces the VRAM footprint by up to 50% and speeds up training epochs with negligible loss in Dice score accuracy.
 - **C++ JIT Compilation**: The model architecture is written to be 100% scriptable. By compiling the model via `torch.jit.script` to `model_trace.pt`, we eliminate all Python interpreter runtime overhead. This JIT binary can be loaded directly inside a C++ daemon (`torch::jit::load`) to serve high-throughput, low-latency concurrent requests.
+- **Preprocessing Alignment**: During slice reassembly, stacked volumes are processed using MONAI's `Orientation(axcodes="RAS")`, `Spacing(pixdim=(1, 1, 1))`, and `NormalizeIntensity` transforms. This ensures that arbitrary scanner slices are normalized and registered to the exact spatial spacing and orientation expected by the trained 3D U-Net.
+- **In-Memory Volumetric Cache**: Exposes slice images and label overlays instantly by caching decompressed `.npz` arrays in a Least-Recently-Used (LRU) memory registry (capped at 5 volumes), eliminating costly disk decompression bottlenecks as users scrub through 3D slices.
 - **Kafka-Lag-Driven Auto-Scaling**: The Kubernetes Horizontal Pod Autoscaler manifest (`backend/deploy/hpa.yaml`) monitors custom external metrics (`kafka_consumergroup_lag` collected via Prometheus Adapter or KEDA) in addition to CPU utilization. If the Kafka ingestion queue accumulates backlog (e.g. during heavy diagnostic workloads), the HPA automatically scales worker replicas up to 10 pods to clear lag, scaling back down to 2 replicas when idle.
