@@ -60,6 +60,9 @@ graph TD
 
 ## 🚀 Setup & Execution Guide
 
+> [!TIP]
+> **Windows Quick-Start:** You can automatically verify dependencies, generate mock files, trace the JIT model, and launch the server by running a single command in the root folder: `.\start.ps1`
+
 ### 1. Installation
 Clone the repository and install the dependencies from the `backend/` directory:
 ```bash
