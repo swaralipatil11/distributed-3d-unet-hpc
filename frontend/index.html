@@ -179,6 +179,12 @@
                             </div>
                         </div>
 
+                        <!-- Three.js 3D Viewport -->
+                        <div id="three-viewport" style="display: none; width: 100%; height: 100%; position: relative;">
+                            <div id="three-canvas-container" style="width: 100%; height: 100%;"></div>
+                            <div class="viewport-label">3D Tumor Reconstruction</div>
+                        </div>
+
                         <!-- Visualizer Placeholder Loader -->
                         <div id="viewer-placeholder" class="viewer-loader">
                             <span class="loader-spinner"></span>
@@ -193,6 +199,16 @@
                             <select id="select-view-mode" class="form-select" disabled>
                                 <option value="single">Single Modality View</option>
                                 <option value="compare">4-Modality Comparison Grid</option>
+                                <option value="three">Interactive 3D Tumor Render</option>
+                            </select>
+                        </div>
+
+                        <div class="setting-row">
+                            <label for="select-plane">Viewing Plane:</label>
+                            <select id="select-plane" class="form-select" disabled>
+                                <option value="axial">Axial Plane (Z-Axis)</option>
+                                <option value="sagittal">Sagittal Plane (X-Axis)</option>
+                                <option value="coronal">Coronal Plane (Y-Axis)</option>
                             </select>
                         </div>
 
@@ -274,6 +290,9 @@
         <p>3D Volumetric Segmentation Worker Engine | Powered by PyTorch & MONAI</p>
     </footer>
 
+    <!-- Three.js CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
     <!-- App JavaScript -->
     <script src="/static/app.js"></script>
 </body>

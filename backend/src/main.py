@@ -496,13 +496,25 @@ async def download_volume_prediction_dicom(volume_id: str):
 
 # API: Get MRI modality slice as PNG image
 @app.get("/api/volume/{volume_id}/slice/{slice_idx}/modality/{modality_idx}")
-async def get_slice_modality(volume_id: str, slice_idx: int, modality_idx: int):
+async def get_slice_modality(volume_id: str, slice_idx: int, modality_idx: int, plane: str = "axial"):
     try:
         volume = get_processed_volume(volume_id)
         image = volume["image"] # Shape (4, 128, 128, 128)
         
-        # Extract 2D slice
-        slice_data = image[modality_idx, :, :, slice_idx]
+        # Extract 2D slice based on anatomical plane
+        if plane == "sagittal":
+            # Slice along 1st dimension (x-axis)
+            slice_data = image[modality_idx, slice_idx, :, :]
+            # Transpose and flip so Z-axis is vertical, Y-axis is horizontal
+            slice_data = np.flip(slice_data.T, axis=0)
+        elif plane == "coronal":
+            # Slice along 2nd dimension (y-axis)
+            slice_data = image[modality_idx, :, slice_idx, :]
+            # Transpose and flip so Z-axis is vertical, X-axis is horizontal
+            slice_data = np.flip(slice_data.T, axis=0)
+        else:
+            # Axial (default: slice along 3rd dimension, z-axis)
+            slice_data = image[modality_idx, :, :, slice_idx]
         
         # Normalize to 0 - 255
         min_val, max_val = slice_data.min(), slice_data.max()
@@ -530,13 +542,21 @@ async def get_slice_modality(volume_id: str, slice_idx: int, modality_idx: int):
 
 # API: Get color-coded transparency PNG for segmentation label
 @app.get("/api/volume/{volume_id}/slice/{slice_idx}/label")
-async def get_slice_label(volume_id: str, slice_idx: int, classes: str = "1,2,3"):
+async def get_slice_label(volume_id: str, slice_idx: int, classes: str = "1,2,3", plane: str = "axial"):
     try:
         volume = get_processed_volume(volume_id)
         label = volume["label"] # Shape (128, 128, 128)
         
-        # Extract 2D slice
-        slice_label = label[:, :, slice_idx]
+        # Extract 2D slice based on anatomical plane
+        if plane == "sagittal":
+            slice_label = label[slice_idx, :, :]
+            slice_label = np.flip(slice_label.T, axis=0)
+        elif plane == "coronal":
+            slice_label = label[:, slice_idx, :]
+            slice_label = np.flip(slice_label.T, axis=0)
+        else:
+            # Axial (default: slice along 3rd dimension, z-axis)
+            slice_label = label[:, :, slice_idx]
         
         # Parse classes parameter (e.g. "1,3" -> [1, 3])
         try:
@@ -569,6 +589,50 @@ async def get_slice_label(volume_id: str, slice_idx: int, classes: str = "1,2,3"
         return Response(status_code=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         logger.error(f"Error serving slice label: {e}")
+        return Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# API: Get 3D tumor boundary points for Three.js rendering
+@app.get("/api/volume/{volume_id}/mesh")
+async def get_volume_mesh(volume_id: str):
+    try:
+        volume = get_processed_volume(volume_id)
+        label = volume["label"] # Shape (128, 128, 128)
+        
+        # Find points where label > 0
+        indices = np.argwhere(label > 0)
+        if indices.size == 0:
+            return {"points": []}
+            
+        # Generate boundary voxel shell to reduce payload size
+        points = []
+        padded_label = np.pad(label, 1, mode='constant', constant_values=0)
+        
+        for x, y, z in indices:
+            px, py, pz = x + 1, y + 1, z + 1
+            # Check 6-neighborhood for background (0)
+            if (padded_label[px-1, py, pz] == 0 or padded_label[px+1, py, pz] == 0 or
+                padded_label[px, py-1, pz] == 0 or padded_label[px, py+1, pz] == 0 or
+                padded_label[px, py, pz-1] == 0 or padded_label[px, py, pz+1] == 0):
+                
+                # Normalize coords to [-1, 1] relative to center
+                nx = (x - 64.0) / 64.0
+                ny = (y - 64.0) / 64.0
+                nz = (z - 64.0) / 64.0
+                val = int(label[x, y, z])
+                points.append([nx, ny, nz, val])
+                
+        # Limit points to 8000 max by downsampling
+        if len(points) > 8000:
+            indices_sample = np.random.choice(len(points), 8000, replace=False)
+            points = [points[idx] for idx in indices_sample]
+            
+        return {"points": points}
+        
+    except FileNotFoundError:
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        logger.error(f"Error serving 3D mesh points: {e}")
         return Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 

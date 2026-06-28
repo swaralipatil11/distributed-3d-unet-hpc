@@ -26,6 +26,7 @@ const labelSlice = document.getElementById("label-slice");
 const viewerPlaceholder = document.getElementById("viewer-placeholder");
 
 const selectViewMode = document.getElementById("select-view-mode");
+const selectPlane = document.getElementById("select-plane");
 const selectModality = document.getElementById("select-modality");
 const sliderSlice = document.getElementById("slider-slice");
 const sliceValText = document.getElementById("slice-val");
@@ -135,24 +136,75 @@ function setupEventListeners() {
         const viewports = document.getElementById("visualizer-viewports");
         const singleVp = document.getElementById("single-viewport");
         const gridVp = document.getElementById("grid-viewports");
+        const threeVp = document.getElementById("three-viewport");
+        
+        // Clean up any existing Three.js animation and scene first
+        destroyThreeScene();
         
         if (val === "compare") {
             viewports.className = "compare-mode";
             singleVp.style.display = "none";
             gridVp.style.display = "grid";
+            threeVp.style.display = "none";
+            
             selectModality.disabled = true;
+            selectPlane.disabled = false;
+            sliderSlice.disabled = false;
+            sliderOpacity.disabled = false;
+            updateSliceImages();
+        } else if (val === "three") {
+            viewports.className = "compare-mode";
+            singleVp.style.display = "none";
+            gridVp.style.display = "none";
+            threeVp.style.display = "block";
+            
+            selectModality.disabled = true;
+            selectPlane.disabled = true;
+            sliderSlice.disabled = true;
+            sliderOpacity.disabled = true;
+            
+            // Load and render 3D mesh points
+            loadAndRender3DMesh();
         } else {
             viewports.className = "single-mode";
             singleVp.style.display = "block";
             gridVp.style.display = "none";
+            threeVp.style.display = "none";
+            
             selectModality.disabled = false;
+            selectPlane.disabled = false;
+            sliderSlice.disabled = false;
+            sliderOpacity.disabled = false;
+            updateSliceImages();
+        }
+    });
+
+    // Viewing Plane Select dropdown
+    selectPlane.addEventListener("change", (e) => {
+        const val = e.target.value;
+        const sliderLabel = document.querySelector('label[for="slider-slice"]');
+        if (sliderLabel) {
+            if (val === "sagittal") {
+                sliderLabel.textContent = "Slice Depth (X-Axis):";
+            } else if (val === "coronal") {
+                sliderLabel.textContent = "Slice Depth (Y-Axis):";
+            } else {
+                sliderLabel.textContent = "Slice Depth (Z-Axis):";
+            }
         }
         updateSliceImages();
     });
 
     // Class Toggles Checkboxes
     ["toggle-class-1", "toggle-class-2", "toggle-class-3"].forEach((id) => {
-        document.getElementById(id).addEventListener("change", updateSliceImages);
+        document.getElementById(id).addEventListener("change", () => {
+            if (selectViewMode.value !== "three") {
+                updateSliceImages();
+            } else {
+                // If in 3D mode, toggle visibility of classes in the active Three.js point cloud
+                updateThreeParticleVisibility();
+            }
+        });
     });
 
     // Modality Select dropdown
@@ -442,8 +494,6 @@ function getEnabledClassesQueryParam() {
 // Enable sliders and visualizer controls
 function enableControls() {
     selectViewMode.disabled = false;
-    sliderSlice.disabled = false;
-    sliderOpacity.disabled = false;
     btnDownload.disabled = false;
     btnDownloadDicom.disabled = false;
     
@@ -452,15 +502,35 @@ function enableControls() {
     const val = selectViewMode.value;
     const singleVp = document.getElementById("single-viewport");
     const gridVp = document.getElementById("grid-viewports");
+    const threeVp = document.getElementById("three-viewport");
     
     if (val === "compare") {
         singleVp.style.display = "none";
         gridVp.style.display = "grid";
+        threeVp.style.display = "none";
+        
         selectModality.disabled = true;
+        selectPlane.disabled = false;
+        sliderSlice.disabled = false;
+        sliderOpacity.disabled = false;
+    } else if (val === "three") {
+        singleVp.style.display = "none";
+        gridVp.style.display = "none";
+        threeVp.style.display = "block";
+        
+        selectModality.disabled = true;
+        selectPlane.disabled = true;
+        sliderSlice.disabled = true;
+        sliderOpacity.disabled = true;
     } else {
         singleVp.style.display = "block";
         gridVp.style.display = "none";
+        threeVp.style.display = "none";
+        
         selectModality.disabled = false;
+        selectPlane.disabled = false;
+        sliderSlice.disabled = false;
+        sliderOpacity.disabled = false;
     }
 }
 
@@ -468,14 +538,18 @@ function enableControls() {
 function disableControls() {
     selectViewMode.disabled = true;
     selectModality.disabled = true;
+    selectPlane.disabled = true;
     sliderSlice.disabled = true;
     sliderOpacity.disabled = true;
     btnDownload.disabled = true;
     btnDownloadDicom.disabled = true;
     
+    destroyThreeScene();
+    
     viewerPlaceholder.style.display = "flex";
     document.getElementById("single-viewport").style.display = "none";
     document.getElementById("grid-viewports").style.display = "none";
+    document.getElementById("three-viewport").style.display = "none";
     patientCard.style.display = "none";
     analysisCard.style.display = "none";
     
@@ -491,19 +565,20 @@ function updateSliceImages() {
     
     const viewMode = selectViewMode.value;
     const enabledClasses = getEnabledClassesQueryParam();
+    const plane = selectPlane.value;
     
     if (viewMode === "single") {
-        const mriSrc = `${apiBase}/api/volume/${currentVolumeId}/slice/${currentSliceIdx}/modality/${currentModalityIdx}?t=${Date.now()}`;
-        const labelSrc = `${apiBase}/api/volume/${currentVolumeId}/slice/${currentSliceIdx}/label?classes=${enabledClasses}&t=${Date.now()}`;
+        const mriSrc = `${apiBase}/api/volume/${currentVolumeId}/slice/${currentSliceIdx}/modality/${currentModalityIdx}?plane=${plane}&t=${Date.now()}`;
+        const labelSrc = `${apiBase}/api/volume/${currentVolumeId}/slice/${currentSliceIdx}/label?classes=${enabledClasses}&plane=${plane}&t=${Date.now()}`;
         
         mriSlice.src = mriSrc;
         labelSlice.src = labelSrc;
         labelSlice.style.opacity = currentOpacity;
-    } else {
+    } else if (viewMode === "compare") {
         // Update all 4 grid viewports synchronously
         for (let i = 0; i < 4; i++) {
-            const mriSrc = `${apiBase}/api/volume/${currentVolumeId}/slice/${currentSliceIdx}/modality/${i}?t=${Date.now()}`;
-            const labelSrc = `${apiBase}/api/volume/${currentVolumeId}/slice/${currentSliceIdx}/label?classes=${enabledClasses}&t=${Date.now()}`;
+            const mriSrc = `${apiBase}/api/volume/${currentVolumeId}/slice/${currentSliceIdx}/modality/${i}?plane=${plane}&t=${Date.now()}`;
+            const labelSrc = `${apiBase}/api/volume/${currentVolumeId}/slice/${currentSliceIdx}/label?classes=${enabledClasses}&plane=${plane}&t=${Date.now()}`;
             
             const mriGridImg = document.getElementById(`mri-slice-${i}`);
             const labelGridImg = document.getElementById(`label-slice-${i}`);
@@ -520,4 +595,206 @@ function updateMetrics(stats) {
     metricResize.textContent = `${stats.resize_time.toFixed(3)}s`;
     metricInference.textContent = `${stats.inference_time.toFixed(3)}s`;
     metricLatency.textContent = `${stats.total_latency.toFixed(2)}s`;
+}
+
+// Clean up Three.js WebGL rendering resources
+function destroyThreeScene() {
+    window.removeEventListener("resize", onThreeWindowResize);
+    if (threeAnimId) {
+        cancelAnimationFrame(threeAnimId);
+        threeAnimId = null;
+    }
+    if (threeRenderer) {
+        threeRenderer.dispose();
+        const container = document.getElementById("three-canvas-container");
+        if (container) container.innerHTML = "";
+        threeRenderer = null;
+    }
+    threeScene = null;
+    threeCamera = null;
+    threeControls = null;
+    threePoints = null;
+    rawMeshPoints = [];
+}
+
+// Load point coordinates and classes from backend for 3D render
+async function loadAndRender3DMesh() {
+    if (!currentVolumeId) return;
+    
+    logToTerminal("3D MESH: Fetching tumor boundary points from backend...", "system");
+    
+    try {
+        const response = await fetch(`${apiBase}/api/volume/${currentVolumeId}/mesh`);
+        if (!response.ok) throw new Error("Backend response error");
+        
+        const data = await response.json();
+        
+        if (!data.points || data.points.length === 0) {
+            logToTerminal("3D MESH: No active tumor cells found in prediction labels.", "system");
+            alert("No tumor tissues detected in this volume. Point cloud is empty.");
+            return;
+        }
+        
+        rawMeshPoints = data.points;
+        logToTerminal(`3D MESH: Loaded ${rawMeshPoints.length} surface voxels. Rendering scene...`, "completed");
+        
+        initThreeScene();
+        
+    } catch (err) {
+        logToTerminal(`3D MESH ERROR: Failed to fetch points: ${err.message}`, "system");
+    }
+}
+
+// Initialize Three.js scene, camera, lights, and orbit controls
+function initThreeScene() {
+    const container = document.getElementById("three-canvas-container");
+    if (!container) return;
+    container.innerHTML = "";
+    
+    const width = container.clientWidth || 580;
+    const height = container.clientHeight || 580;
+    
+    // Scene Setup
+    threeScene = new THREE.Scene();
+    threeScene.background = new THREE.Color(0x05070c);
+    
+    // Camera Setup
+    threeCamera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
+    threeCamera.position.set(1.8, 1.2, 1.8);
+    
+    // WebGL Renderer Setup
+    threeRenderer = new THREE.WebGLRenderer({ antialias: true });
+    threeRenderer.setSize(width, height);
+    threeRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    container.appendChild(threeRenderer.domElement);
+    
+    // Orbit Navigation Controls
+    threeControls = new THREE.OrbitControls(threeCamera, threeRenderer.domElement);
+    threeControls.enableDamping = true;
+    threeControls.dampingFactor = 0.05;
+    threeControls.maxDistance = 12;
+    threeControls.minDistance = 0.8;
+    
+    // Wireframe Grid Helper for spatial scale reference
+    const gridHelper = new THREE.GridHelper(2.5, 20, 0x00f2fe, 0x14182b);
+    gridHelper.position.y = -1.2;
+    threeScene.add(gridHelper);
+    
+    // Build particle buffer object
+    createTumorParticles();
+    
+    // Ambient and directional lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+    threeScene.add(ambientLight);
+    
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.9);
+    directionalLight.position.set(5, 5, 5);
+    threeScene.add(directionalLight);
+    
+    // Monitor screen resizing
+    window.addEventListener("resize", onThreeWindowResize);
+    
+    // Fire render/animation frame loop
+    animateThree();
+}
+
+// Create points geometry and mapping
+function createTumorParticles() {
+    if (!threeScene) return;
+    if (threePoints) threeScene.remove(threePoints);
+    
+    const geometry = new THREE.BufferGeometry();
+    const positions = [];
+    const colors = [];
+    
+    const colorMap = {
+        1: new THREE.Color(0x22c55e), // Edema (Green)
+        2: new THREE.Color(0x3b82f6), // Non-enhancing (Blue)
+        3: new THREE.Color(0xef4444)  // Enhancing (Red)
+    };
+    
+    const enabledMap = {
+        1: document.getElementById("toggle-class-1").checked,
+        2: document.getElementById("toggle-class-2").checked,
+        3: document.getElementById("toggle-class-3").checked
+    };
+    
+    rawMeshPoints.forEach(([x, y, z, val]) => {
+        if (enabledMap[val]) {
+            // Map MONAI RAS to Three.js coordinates (X=x, Y=z, Z=-y)
+            positions.push(x, z, -y);
+            
+            const c = colorMap[val] || new THREE.Color(0xffffff);
+            colors.push(c.r, c.g, c.b);
+        }
+    });
+    
+    if (positions.length === 0) return;
+    
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    
+    // Glowing round particle texture using radial gradient canvas
+    const canvas = document.createElement("canvas");
+    canvas.width = 16;
+    canvas.height = 16;
+    const ctx = canvas.getContext("2d");
+    const grad = ctx.createRadialGradient(8, 8, 0, 8, 8, 8);
+    grad.addColorStop(0, "rgba(255, 255, 255, 1)");
+    grad.addColorStop(1, "rgba(255, 255, 255, 0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 16, 16);
+    
+    const pTexture = new THREE.CanvasTexture(canvas);
+    
+    const material = new THREE.PointsMaterial({
+        size: 0.05,
+        vertexColors: true,
+        map: pTexture,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+    });
+    
+    threePoints = new THREE.Points(geometry, material);
+    threeScene.add(threePoints);
+}
+
+// Refresh particle rendering when checkboxes are toggled
+function updateThreeParticleVisibility() {
+    if (threeScene && threePoints && rawMeshPoints.length > 0) {
+        createTumorParticles();
+    }
+}
+
+// Handle browser viewport scale resizing
+function onThreeWindowResize() {
+    const container = document.getElementById("three-canvas-container");
+    if (!container || !threeCamera || !threeRenderer) return;
+    
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+    
+    threeCamera.aspect = width / height;
+    threeCamera.updateProjectionMatrix();
+    
+    threeRenderer.setSize(width, height);
+}
+
+// Continuous WebGL animation render loop
+function animateThree() {
+    if (!threeRenderer || !threeScene || !threeCamera) return;
+    
+    threeAnimId = requestAnimationFrame(animateThree);
+    
+    // Add micro-rotation
+    if (threePoints) {
+        threePoints.rotation.y += 0.0025;
+    }
+    
+    if (threeControls) {
+        threeControls.update();
+    }
+    
+    threeRenderer.render(threeScene, threeCamera);
 }
