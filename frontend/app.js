@@ -35,6 +35,22 @@ const metricResize = document.getElementById("metric-resize");
 const metricInference = document.getElementById("metric-inference");
 const metricLatency = document.getElementById("metric-latency");
 
+// Uploader Elements
+const dropZone = document.getElementById("drop-zone");
+const fileUpload = document.getElementById("file-upload");
+const uploadProgressContainer = document.getElementById("upload-progress-container");
+const uploadStatusText = document.getElementById("upload-status-text");
+const uploadPercentText = document.getElementById("upload-percent-text");
+const uploadProgressBar = document.getElementById("upload-progress-bar");
+
+// Patient Info and Download Elements
+const patientCard = document.getElementById("patient-card");
+const patName = document.getElementById("pat-name");
+const patId = document.getElementById("pat-id");
+const patDate = document.getElementById("pat-date");
+const patDesc = document.getElementById("pat-desc");
+const btnDownload = document.getElementById("btn-download");
+
 
 // Initialize Application
 document.addEventListener("DOMContentLoaded", () => {
@@ -60,12 +76,30 @@ function setupEventListeners() {
             if (selectedOption.dataset.stats) {
                 const stats = JSON.parse(selectedOption.dataset.stats);
                 updateMetrics(stats);
+                
+                // Load patient metadata if present
+                if (stats.patient_metadata) {
+                    patName.textContent = stats.patient_metadata.patient_name || "Anonymous";
+                    patId.textContent = stats.patient_metadata.patient_id || "N/A";
+                    patDate.textContent = stats.patient_metadata.study_date || "N/A";
+                    patDesc.textContent = stats.patient_metadata.study_description || "N/A";
+                    patientCard.style.display = "block";
+                } else {
+                    patientCard.style.display = "none";
+                }
             }
             
             updateSliceImages();
         } else {
             currentVolumeId = "";
             disableControls();
+        }
+    });
+
+    // Download button event
+    btnDownload.addEventListener("click", () => {
+        if (currentVolumeId) {
+            window.location.href = `${apiBase}/api/volume/${currentVolumeId}/download`;
         }
     });
 
@@ -88,6 +122,33 @@ function setupEventListeners() {
         currentOpacity = opacityVal / 100;
         opacityValText.textContent = `${opacityVal}%`;
         labelSlice.style.opacity = currentOpacity;
+    });
+
+    // Drag & Drop events
+    dropZone.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        dropZone.classList.add("drag-over");
+    });
+
+    ["dragleave", "dragend"].forEach((type) => {
+        dropZone.addEventListener(type, () => {
+            dropZone.classList.remove("drag-over");
+        });
+    });
+
+    dropZone.addEventListener("drop", (e) => {
+        e.preventDefault();
+        dropZone.classList.remove("drag-over");
+        
+        if (e.dataTransfer.files.length) {
+            handleFileUpload(e.dataTransfer.files[0]);
+        }
+    });
+
+    fileUpload.addEventListener("change", (e) => {
+        if (fileUpload.files.length) {
+            handleFileUpload(fileUpload.files[0]);
+        }
     });
 }
 
@@ -203,6 +264,75 @@ async function triggerSimulation() {
     }
 }
 
+// Upload MRI Scan file or DICOM zip folder via API
+function handleFileUpload(file) {
+    const filename = file.name;
+    if (!filename.endsWith(".nii.gz") && !filename.endsWith(".nii") && !filename.endsWith(".zip")) {
+        logToTerminal(`ERROR: Unsupported file format. Please upload .nii.gz, .nii, or .zip.`, "system");
+        alert("Unsupported file format. Please upload a NIfTI (.nii.gz) or DICOM ZIP (.zip) file.");
+        return;
+    }
+
+    logToTerminal(`Uploading scan file: ${filename}...`, "system");
+    
+    // Reset progress UI
+    ingestStatus.textContent = "Uploading scan...";
+    ingestPercent.textContent = "0%";
+    progressBarFill.style.width = "0%";
+    
+    uploadProgressContainer.style.display = "block";
+    uploadStatusText.textContent = `Uploading ${filename}...`;
+    uploadPercentText.textContent = "0%";
+    uploadProgressBar.style.width = "0%";
+    
+    const formData = new FormData();
+    formData.append("file", file);
+    
+    const xhr = new XMLHttpRequest();
+    
+    // Track upload progress
+    xhr.upload.addEventListener("progress", (e) => {
+        if (e.lengthComputable) {
+            const percent = Math.round((e.loaded / e.total) * 100);
+            uploadPercentText.textContent = `${percent}%`;
+            uploadProgressBar.style.width = `${percent}%`;
+        }
+    });
+    
+    // Complete upload
+    xhr.onload = () => {
+        if (xhr.status === 200) {
+            const res = JSON.parse(xhr.responseText);
+            logToTerminal(`Upload completed. Processing scan on worker engine... (Upload ID: ${res.upload_id})`, "completed");
+            uploadStatusText.textContent = "Processing file on server...";
+            
+            // Hide progress container after a short delay
+            setTimeout(() => {
+                uploadProgressContainer.style.display = "none";
+            }, 3000);
+        } else {
+            let errorMsg = "Upload failed.";
+            try {
+                const res = JSON.parse(xhr.responseText);
+                errorMsg = res.message || errorMsg;
+            } catch (e) {}
+            logToTerminal(`ERROR: Upload failed: ${errorMsg}`, "system");
+            uploadStatusText.textContent = "Upload failed.";
+            uploadProgressContainer.style.display = "none";
+        }
+    };
+    
+    // Error handling
+    xhr.onerror = () => {
+        logToTerminal("ERROR: Network upload error occurred.", "system");
+        uploadStatusText.textContent = "Upload failed.";
+        uploadProgressContainer.style.display = "none";
+    };
+    
+    xhr.open("POST", `${apiBase}/api/upload`);
+    xhr.send(formData);
+}
+
 // Load List of processed volumes from API
 async function loadVolumeList(selectedVolumeId = "") {
     try {
@@ -253,6 +383,7 @@ function enableControls() {
     selectModality.disabled = false;
     sliderSlice.disabled = false;
     sliderOpacity.disabled = false;
+    btnDownload.disabled = false;
     
     viewerPlaceholder.style.display = "none";
     mriSlice.style.display = "block";
@@ -264,10 +395,12 @@ function disableControls() {
     selectModality.disabled = true;
     sliderSlice.disabled = true;
     sliderOpacity.disabled = true;
+    btnDownload.disabled = true;
     
     viewerPlaceholder.style.display = "flex";
     mriSlice.style.display = "none";
     labelSlice.style.display = "none";
+    patientCard.style.display = "none";
     
     // Clear metrics
     metricResize.textContent = "0.000s";

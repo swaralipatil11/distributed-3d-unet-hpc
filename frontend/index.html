@@ -32,11 +32,41 @@
                     <button id="btn-simulate" class="btn btn-primary">⚡ Simulate Hospital Scan Stream</button>
                 </div>
                 
+                <!-- Web File Uploader Area -->
+                <div class="control-group margin-top">
+                    <label>Or Upload scanner scan (.nii.gz / .zip):</label>
+                    <div id="drop-zone" class="drop-zone">
+                        <span class="drop-zone-text">Drag & drop scan file or click to browse</span>
+                        <input type="file" id="file-upload" class="drop-zone-input" accept=".nii.gz,.nii,.zip">
+                    </div>
+                    <!-- Upload Progress -->
+                    <div id="upload-progress-container" class="upload-progress-container" style="display: none;">
+                        <div class="upload-progress-details">
+                            <span id="upload-status-text">Uploading file...</span>
+                            <span id="upload-percent-text">0%</span>
+                        </div>
+                        <div class="progress-bar-bg small">
+                            <div id="upload-progress-bar" class="progress-bar-fill" style="width: 0%"></div>
+                        </div>
+                    </div>
+                </div>
+                
                 <div class="control-group margin-top">
                     <label for="select-volume">Processed Volumes:</label>
                     <select id="select-volume" class="form-select">
                         <option value="">-- No Volumes Processed --</option>
                     </select>
+                </div>
+            </div>
+
+            <!-- Patient Details Card -->
+            <div class="card glass" id="patient-card" style="display: none;">
+                <h2>Patient Details</h2>
+                <div class="patient-info">
+                    <div class="patient-row"><span class="info-label">Name:</span> <span id="pat-name" class="info-value">Smith^John</span></div>
+                    <div class="patient-row"><span class="info-label">Patient ID:</span> <span id="pat-id" class="info-value">MR-98765</span></div>
+                    <div class="patient-row"><span class="info-label">Study Date:</span> <span id="pat-date" class="info-value">2026-06-25</span></div>
+                    <div class="patient-row"><span class="info-label">Description:</span> <span id="pat-desc" class="info-value">Simulated Hospital Scan Stream</span></div>
                 </div>
             </div>
 
@@ -110,6 +140,10 @@
                                 <span id="opacity-val">70%</span>
                             </div>
                             <input type="range" id="slider-opacity" min="0" max="100" value="70" class="form-range" disabled>
+                        </div>
+
+                        <div class="setting-row margin-top">
+                            <button id="btn-download" class="btn btn-secondary" disabled>📥 Download NIfTI Segmentation</button>
                         </div>
 
                         <!-- Legend -->

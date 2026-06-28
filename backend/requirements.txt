@@ -8,3 +8,4 @@ uvicorn
 pyyaml
 nibabel
 Pillow
+pydicom
