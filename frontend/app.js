@@ -25,6 +25,7 @@ const mriSlice = document.getElementById("mri-slice");
 const labelSlice = document.getElementById("label-slice");
 const viewerPlaceholder = document.getElementById("viewer-placeholder");
 
+const selectViewMode = document.getElementById("select-view-mode");
 const selectModality = document.getElementById("select-modality");
 const sliderSlice = document.getElementById("slider-slice");
 const sliceValText = document.getElementById("slice-val");
@@ -50,6 +51,8 @@ const patId = document.getElementById("pat-id");
 const patDate = document.getElementById("pat-date");
 const patDesc = document.getElementById("pat-desc");
 const btnDownload = document.getElementById("btn-download");
+const btnDownloadDicom = document.getElementById("btn-download-dicom");
+const analysisCard = document.getElementById("analysis-card");
 
 
 // Initialize Application
@@ -87,6 +90,22 @@ function setupEventListeners() {
                 } else {
                     patientCard.style.display = "none";
                 }
+
+                // Load volumetric stats if present
+                if (stats.volumetric_stats) {
+                    const vs = stats.volumetric_stats;
+                    document.getElementById("vol-class-1").textContent = `${vs.edema_volume_cc.toFixed(2)} cc`;
+                    document.getElementById("vox-class-1").textContent = vs.edema_voxels.toLocaleString();
+                    document.getElementById("vol-class-2").textContent = `${vs.non_enhancing_volume_cc.toFixed(2)} cc`;
+                    document.getElementById("vox-class-2").textContent = vs.non_enhancing_voxels.toLocaleString();
+                    document.getElementById("vol-class-3").textContent = `${vs.enhancing_volume_cc.toFixed(2)} cc`;
+                    document.getElementById("vox-class-3").textContent = vs.enhancing_voxels.toLocaleString();
+                    document.getElementById("vol-total").textContent = `${vs.total_tumor_volume_cc.toFixed(2)} cc`;
+                    document.getElementById("vox-total").textContent = vs.total_tumor_voxels.toLocaleString();
+                    analysisCard.style.display = "block";
+                } else {
+                    analysisCard.style.display = "none";
+                }
             }
             
             updateSliceImages();
@@ -101,6 +120,39 @@ function setupEventListeners() {
         if (currentVolumeId) {
             window.location.href = `${apiBase}/api/volume/${currentVolumeId}/download`;
         }
+    });
+
+    // Download DICOM button event
+    btnDownloadDicom.addEventListener("click", () => {
+        if (currentVolumeId) {
+            window.location.href = `${apiBase}/api/volume/${currentVolumeId}/download/dicom`;
+        }
+    });
+
+    // View Mode Layout Select dropdown
+    selectViewMode.addEventListener("change", (e) => {
+        const val = e.target.value;
+        const viewports = document.getElementById("visualizer-viewports");
+        const singleVp = document.getElementById("single-viewport");
+        const gridVp = document.getElementById("grid-viewports");
+        
+        if (val === "compare") {
+            viewports.className = "compare-mode";
+            singleVp.style.display = "none";
+            gridVp.style.display = "grid";
+            selectModality.disabled = true;
+        } else {
+            viewports.className = "single-mode";
+            singleVp.style.display = "block";
+            gridVp.style.display = "none";
+            selectModality.disabled = false;
+        }
+        updateSliceImages();
+    });
+
+    // Class Toggles Checkboxes
+    ["toggle-class-1", "toggle-class-2", "toggle-class-3"].forEach((id) => {
+        document.getElementById(id).addEventListener("change", updateSliceImages);
     });
 
     // Modality Select dropdown
@@ -378,29 +430,54 @@ async function loadVolumeList(selectedVolumeId = "") {
     }
 }
 
+// Helper to query enabled classes
+function getEnabledClassesQueryParam() {
+    const classes = [];
+    if (document.getElementById("toggle-class-1").checked) classes.push(1);
+    if (document.getElementById("toggle-class-2").checked) classes.push(2);
+    if (document.getElementById("toggle-class-3").checked) classes.push(3);
+    return classes.join(",");
+}
+
 // Enable sliders and visualizer controls
 function enableControls() {
-    selectModality.disabled = false;
+    selectViewMode.disabled = false;
     sliderSlice.disabled = false;
     sliderOpacity.disabled = false;
     btnDownload.disabled = false;
+    btnDownloadDicom.disabled = false;
     
     viewerPlaceholder.style.display = "none";
-    mriSlice.style.display = "block";
-    labelSlice.style.display = "block";
+    
+    const val = selectViewMode.value;
+    const singleVp = document.getElementById("single-viewport");
+    const gridVp = document.getElementById("grid-viewports");
+    
+    if (val === "compare") {
+        singleVp.style.display = "none";
+        gridVp.style.display = "grid";
+        selectModality.disabled = true;
+    } else {
+        singleVp.style.display = "block";
+        gridVp.style.display = "none";
+        selectModality.disabled = false;
+    }
 }
 
 // Disable sliders and visualizer controls
 function disableControls() {
+    selectViewMode.disabled = true;
     selectModality.disabled = true;
     sliderSlice.disabled = true;
     sliderOpacity.disabled = true;
     btnDownload.disabled = true;
+    btnDownloadDicom.disabled = true;
     
     viewerPlaceholder.style.display = "flex";
-    mriSlice.style.display = "none";
-    labelSlice.style.display = "none";
+    document.getElementById("single-viewport").style.display = "none";
+    document.getElementById("grid-viewports").style.display = "none";
     patientCard.style.display = "none";
+    analysisCard.style.display = "none";
     
     // Clear metrics
     metricResize.textContent = "0.000s";
@@ -412,13 +489,30 @@ function disableControls() {
 function updateSliceImages() {
     if (!currentVolumeId) return;
     
-    // Update labels and MRI image sources
-    const mriSrc = `${apiBase}/api/volume/${currentVolumeId}/slice/${currentSliceIdx}/modality/${currentModalityIdx}?t=${Date.now()}`;
-    const labelSrc = `${apiBase}/api/volume/${currentVolumeId}/slice/${currentSliceIdx}/label?t=${Date.now()}`;
+    const viewMode = selectViewMode.value;
+    const enabledClasses = getEnabledClassesQueryParam();
     
-    mriSlice.src = mriSrc;
-    labelSlice.src = labelSrc;
-    labelSlice.style.opacity = currentOpacity;
+    if (viewMode === "single") {
+        const mriSrc = `${apiBase}/api/volume/${currentVolumeId}/slice/${currentSliceIdx}/modality/${currentModalityIdx}?t=${Date.now()}`;
+        const labelSrc = `${apiBase}/api/volume/${currentVolumeId}/slice/${currentSliceIdx}/label?classes=${enabledClasses}&t=${Date.now()}`;
+        
+        mriSlice.src = mriSrc;
+        labelSlice.src = labelSrc;
+        labelSlice.style.opacity = currentOpacity;
+    } else {
+        // Update all 4 grid viewports synchronously
+        for (let i = 0; i < 4; i++) {
+            const mriSrc = `${apiBase}/api/volume/${currentVolumeId}/slice/${currentSliceIdx}/modality/${i}?t=${Date.now()}`;
+            const labelSrc = `${apiBase}/api/volume/${currentVolumeId}/slice/${currentSliceIdx}/label?classes=${enabledClasses}&t=${Date.now()}`;
+            
+            const mriGridImg = document.getElementById(`mri-slice-${i}`);
+            const labelGridImg = document.getElementById(`label-slice-${i}`);
+            
+            mriGridImg.src = mriSrc;
+            labelGridImg.src = labelSrc;
+            labelGridImg.style.opacity = currentOpacity;
+        }
+    }
 }
 
 // Update metrics panel

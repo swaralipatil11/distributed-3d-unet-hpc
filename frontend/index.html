@@ -70,6 +70,44 @@
                 </div>
             </div>
 
+            <!-- Quantitative Analysis Card -->
+            <div class="card glass" id="analysis-card" style="display: none;">
+                <h2>Quantitative Analysis</h2>
+                <div class="analysis-info">
+                    <table class="stats-table">
+                        <thead>
+                            <tr>
+                                <th>Sub-Region</th>
+                                <th style="text-align: right;">Volume (cc)</th>
+                                <th style="text-align: right;">Voxel Count</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><span class="color-dot edema"></span> Edema (Class 1)</td>
+                                <td id="vol-class-1" style="text-align: right;">0.00 cc</td>
+                                <td id="vox-class-1" style="text-align: right;">0</td>
+                            </tr>
+                            <tr>
+                                <td><span class="color-dot non-enhancing"></span> Non-enhancing (Class 2)</td>
+                                <td id="vol-class-2" style="text-align: right;">0.00 cc</td>
+                                <td id="vox-class-2" style="text-align: right;">0</td>
+                            </tr>
+                            <tr>
+                                <td><span class="color-dot enhancing"></span> Enhancing (Class 3)</td>
+                                <td id="vol-class-3" style="text-align: right;">0.00 cc</td>
+                                <td id="vox-class-3" style="text-align: right;">0</td>
+                            </tr>
+                            <tr class="total-row">
+                                <td>Total Tumor Volume</td>
+                                <td id="vol-total" style="text-align: right;">0.00 cc</td>
+                                <td id="vox-total" style="text-align: right;">0</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
             <!-- Ingestion Progress Card -->
             <div class="card glass">
                 <h2>Live Ingestion Progress</h2>
@@ -99,23 +137,65 @@
             <div class="card glass visualizer-card">
                 <h2>3D Voxel Slice Viewer</h2>
                 <div class="visualizer-container">
-                    <!-- Slice Layers Stack -->
-                    <div class="slice-viewport">
-                        <div class="slice-layers">
-                            <!-- Base Gray MRI Scan -->
-                            <img id="mri-slice" src="" alt="MRI Slice Base" class="slice-image placeholder" style="display: none;">
-                            <!-- Segmentation Class Overlay -->
-                            <img id="label-slice" src="" alt="Segmentation Overlay" class="slice-image label-overlay" style="display: none;">
-                            <!-- Visualizer Placeholder Loader -->
-                            <div id="viewer-placeholder" class="viewer-loader">
-                                <span class="loader-spinner"></span>
-                                <p>Select or simulate a volume to view 3D slices</p>
+                    <!-- Slice Layers Stack Wrapper -->
+                    <div id="visualizer-viewports" class="single-mode">
+                        <!-- Single Viewport (default) -->
+                        <div id="single-viewport" class="slice-viewport">
+                            <div class="slice-layers">
+                                <img id="mri-slice" src="" alt="MRI Slice Base" class="slice-image" style="display: none;">
+                                <img id="label-slice" src="" alt="Segmentation Overlay" class="slice-image label-overlay" style="display: none;">
                             </div>
+                        </div>
+
+                        <!-- Grid Viewports (Comparison Mode) -->
+                        <div id="grid-viewports" class="comparison-grid" style="display: none;">
+                            <div class="grid-viewport slice-viewport">
+                                <div class="slice-layers">
+                                    <img id="mri-slice-0" src="" alt="FLAIR" class="slice-image">
+                                    <img id="label-slice-0" src="" alt="FLAIR Overlay" class="slice-image label-overlay">
+                                </div>
+                                <div class="viewport-label">FLAIR</div>
+                            </div>
+                            <div class="grid-viewport slice-viewport">
+                                <div class="slice-layers">
+                                    <img id="mri-slice-1" src="" alt="T1w" class="slice-image">
+                                    <img id="label-slice-1" src="" alt="T1w Overlay" class="slice-image label-overlay">
+                                </div>
+                                <div class="viewport-label">T1w</div>
+                            </div>
+                            <div class="grid-viewport slice-viewport">
+                                <div class="slice-layers">
+                                    <img id="mri-slice-2" src="" alt="t1gd" class="slice-image">
+                                    <img id="label-slice-2" src="" alt="t1gd Overlay" class="slice-image label-overlay">
+                                </div>
+                                <div class="viewport-label">t1gd / T1c</div>
+                            </div>
+                            <div class="grid-viewport slice-viewport">
+                                <div class="slice-layers">
+                                    <img id="mri-slice-3" src="" alt="T2w" class="slice-image">
+                                    <img id="label-slice-3" src="" alt="T2w Overlay" class="slice-image label-overlay">
+                                </div>
+                                <div class="viewport-label">T2w</div>
+                            </div>
+                        </div>
+
+                        <!-- Visualizer Placeholder Loader -->
+                        <div id="viewer-placeholder" class="viewer-loader">
+                            <span class="loader-spinner"></span>
+                            <p>Select or simulate a volume to view 3D slices</p>
                         </div>
                     </div>
 
                     <!-- Visualizer Settings -->
                     <div class="visualizer-settings">
+                        <div class="setting-row">
+                            <label for="select-view-mode">Viewer Layout:</label>
+                            <select id="select-view-mode" class="form-select" disabled>
+                                <option value="single">Single Modality View</option>
+                                <option value="compare">4-Modality Comparison Grid</option>
+                            </select>
+                        </div>
+
                         <div class="setting-row">
                             <label for="select-modality">MRI Modality:</label>
                             <select id="select-modality" class="form-select" disabled>
@@ -142,17 +222,27 @@
                             <input type="range" id="slider-opacity" min="0" max="100" value="70" class="form-range" disabled>
                         </div>
 
-                        <div class="setting-row margin-top">
-                            <button id="btn-download" class="btn btn-secondary" disabled>📥 Download NIfTI Segmentation</button>
+                        <div class="setting-row margin-top display-flex gap-half">
+                            <button id="btn-download" class="btn btn-secondary flex-1" disabled>📥 NIfTI</button>
+                            <button id="btn-download-dicom" class="btn btn-secondary flex-1" disabled>📥 DICOM</button>
                         </div>
 
-                        <!-- Legend -->
+                        <!-- Legend and Class Toggles -->
                         <div class="segmentation-legend">
-                            <h3>Segmentation Classes:</h3>
+                            <h3>Segmentation Overlays (Toggle to View):</h3>
                             <div class="legend-items">
-                                <div class="legend-item"><span class="color-box edema"></span> Edema (Class 1)</div>
-                                <div class="legend-item"><span class="color-box non-enhancing"></span> Non-enhancing (Class 2)</div>
-                                <div class="legend-item"><span class="color-box enhancing"></span> Enhancing (Class 3)</div>
+                                <label class="legend-item checkbox-label">
+                                    <input type="checkbox" id="toggle-class-1" checked class="class-toggle-checkbox">
+                                    <span class="color-box edema"></span> Edema (Class 1)
+                                </label>
+                                <label class="legend-item checkbox-label">
+                                    <input type="checkbox" id="toggle-class-2" checked class="class-toggle-checkbox">
+                                    <span class="color-box non-enhancing"></span> Non-enhancing (Class 2)
+                                </label>
+                                <label class="legend-item checkbox-label">
+                                    <input type="checkbox" id="toggle-class-3" checked class="class-toggle-checkbox">
+                                    <span class="color-box enhancing"></span> Enhancing (Class 3)
+                                </label>
                             </div>
                         </div>
                     </div>

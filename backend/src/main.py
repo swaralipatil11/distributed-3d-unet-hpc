@@ -58,6 +58,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model: torch.jit.ScriptModule = None
 volume_cache: Dict[str, List[Any]] = {} # Maps volume_id -> list of slices
 volume_metadata: Dict[str, Dict[str, Any]] = {}
+kafka_connected = False
 
 # Simple cache for processed volumes to avoid loading/decompressing files on every slice request
 # Stores volume_id -> {"image": np.ndarray, "label": np.ndarray, "timestamp": float}
@@ -98,6 +99,7 @@ async def cleanup_cache_loop():
     """
     Background task that runs periodically to remove stale volumes
     from the in-memory cache to prevent memory leaks.
+    Also cleans up old exported NIfTI prediction files.
     """
     while True:
         await asyncio.sleep(60)
@@ -114,6 +116,28 @@ async def cleanup_cache_loop():
                 del volume_cache[volume_id]
             if volume_id in volume_metadata:
                 del volume_metadata[volume_id]
+
+        # Clean up old exported NIfTI and DICOM zip files (older than 24 hours)
+        try:
+            export_dir = Path("./data/exports")
+            if export_dir.exists():
+                for file in list(export_dir.glob("*.nii.gz")) + list(export_dir.glob("*.zip")):
+                    if now - file.stat().st_mtime > 86400: # 24 hours
+                        logger.info(f"Removing old exported file: {file.name}")
+                        file.unlink()
+        except Exception as e:
+            logger.warning(f"Could not clean up old exported files: {e}")
+
+        # Clean up old backup source DICOM zip files (older than 24 hours)
+        try:
+            dicom_sources_dir = Path("./data/dicom_sources")
+            if dicom_sources_dir.exists():
+                for file in dicom_sources_dir.glob("*.zip"):
+                    if now - file.stat().st_mtime > 86400: # 24 hours
+                        logger.info(f"Removing old source DICOM backup zip: {file.name}")
+                        file.unlink()
+        except Exception as e:
+            logger.warning(f"Could not clean up old backup source DICOM files: {e}")
 
 
 # WebSocket Connection Manager
@@ -195,10 +219,14 @@ async def websocket_endpoint(websocket: WebSocket):
 # Health check endpoint
 @app.get("/healthz", status_code=status.HTTP_200_OK)
 async def health_check():
+    global kafka_connected
+    is_healthy = model is not None
     return {
-        "status": "healthy" if model is not None else "degraded",
+        "status": "healthy" if is_healthy else "degraded",
         "device": str(device),
-        "active_streams": len(volume_cache)
+        "active_streams": len(volume_cache),
+        "kafka_connected": kafka_connected,
+        "model_loaded": model is not None
     }
 
 
@@ -270,6 +298,202 @@ async def download_volume_prediction(volume_id: str):
         )
 
 
+# API: Download prediction as DICOM (.zip) series
+@app.get("/api/volume/{volume_id}/download/dicom")
+async def download_volume_prediction_dicom(volume_id: str):
+    try:
+        # Load the processed segmentation results
+        results_path = Path(f"./data/results/{volume_id}.npz")
+        if not results_path.exists():
+            return Response(
+                content=json.dumps({"status": "error", "message": "Volume results not found."}),
+                status_code=status.HTTP_404_NOT_FOUND,
+                media_type="application/json"
+            )
+            
+        archive = np.load(results_path, allow_pickle=True)
+        label = archive["label"] # Shape (128, 128, 128)
+        meta = json.loads(str(archive["metadata"]))
+        
+        # Prepare export directory
+        export_dir = Path("./data/exports")
+        export_dir.mkdir(parents=True, exist_ok=True)
+        export_zip = export_dir / f"{volume_id}_dicom_segmentation.zip"
+        
+        # Create temp folder for storing dcm slices before zipping
+        dcm_temp = Path(f"./data/uploads/export_dcm_{volume_id}")
+        if dcm_temp.exists():
+            shutil.rmtree(dcm_temp)
+        dcm_temp.mkdir(parents=True, exist_ok=True)
+        
+        backup_zip_path = Path(f"./data/dicom_sources/{volume_id}.zip")
+        
+        if backup_zip_path.exists():
+            logger.info(f"DICOM source zip found. Generating segmentation overlay on original DICOM series...")
+            # Extract original DICOM files
+            extract_temp = dcm_temp / "original_extracted"
+            extract_temp.mkdir(parents=True, exist_ok=True)
+            
+            with zipfile.ZipFile(backup_zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_temp)
+                
+            dcm_files = sorted(list(extract_temp.rglob("*.dcm")) + list(extract_temp.rglob("*.DCM")))
+            
+            # Group by directories or simply sort original files by slice z-position
+            slices_data = []
+            for d_file in dcm_files:
+                try:
+                    ds = pydicom.dcmread(str(d_file), force=True)
+                    pos = getattr(ds, "ImagePositionPatient", [0, 0, 0])
+                    z_coord = pos[2] if len(pos) > 2 else 0.0
+                    slice_loc = getattr(ds, "SliceLocation", z_coord)
+                    slices_data.append({
+                        "path": d_file,
+                        "z": slice_loc,
+                        "ds": ds
+                    })
+                except Exception as ex:
+                    logger.warning(f"Error reading slice during export: {ex}")
+                    
+            if not slices_data:
+                raise ValueError("Could not parse original DICOM files from backup.")
+                
+            slices_data = sorted(slices_data, key=lambda x: x["z"])
+            num_original_slices = len(slices_data)
+            
+            # Generate valid UIDs under 64 characters for the segmentation series
+            import random
+            from pydicom.uid import ImplicitVRLittleEndian
+            seg_series_uid = f"1.2.826.0.1.3680043.8.498.99.{random.randint(10**9, 10**10 - 1)}"
+            
+            # Map segmentation slices to original slices
+            for i, item in enumerate(slices_data):
+                ds = item["ds"]
+                
+                # Rescale slice index from original count to 128
+                z_label_idx = int(i * 128 / num_original_slices)
+                z_label_idx = min(max(z_label_idx, 0), 127)
+                
+                # Get the 2D label slice (128x128)
+                label_slice = label[:, :, z_label_idx]
+                
+                # Resize 2D label slice to match original columns and rows
+                rows = getattr(ds, "Rows", 128)
+                cols = getattr(ds, "Columns", 128)
+                
+                img = Image.fromarray(label_slice.astype(np.uint8), mode="L")
+                img_resized = img.resize((cols, rows), resample=Image.NEAREST)
+                label_resized = np.array(img_resized)
+                
+                # Map classes to high-contrast grey levels [0, 80, 160, 240]
+                m_label = np.zeros_like(label_resized, dtype=np.uint16)
+                m_label[label_resized == 1] = 80
+                m_label[label_resized == 2] = 160
+                m_label[label_resized == 3] = 240
+                
+                # Modify DICOM tags with valid UIDs
+                ds.SeriesDescription = "3D U-Net Brain Tumor Segmentation"
+                ds.SeriesInstanceUID = seg_series_uid
+                ds.SOPInstanceUID = f"{seg_series_uid}.99.{i}"
+                ds.PixelData = m_label.tobytes()
+                ds.Rows, ds.Columns = rows, cols
+                ds.BitsAllocated = 16
+                ds.BitsStored = 16
+                ds.HighBit = 15
+                ds.PixelRepresentation = 0
+                
+                if hasattr(ds, "RescaleSlope"):
+                    ds.RescaleSlope = 1.0
+                if hasattr(ds, "RescaleIntercept"):
+                    ds.RescaleIntercept = 0.0
+                
+                # Set File Meta Header to ensure standard Part 10 format
+                from pydicom.dataset import Dataset
+                ds.file_meta = Dataset()
+                ds.file_meta.TransferSyntaxUID = ImplicitVRLittleEndian
+                ds.file_meta.MediaStorageSOPClassUID = getattr(ds, "SOPClassUID", "1.2.840.10008.5.1.4.1.1.2")
+                ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+                
+                ds.is_little_endian = True
+                ds.is_implicit_VR = True
+                    
+                # Save to export folder as standard DICOM Part 10
+                export_path = dcm_temp / f"segmentation_slice_{i:03d}.dcm"
+                ds.save_as(str(export_path), write_like_original=False)
+                
+        else:
+            logger.info("No DICOM source zip backup found. Creating synthetic DICOM series...")
+            # Fallback: create basic synthetic DICOM series
+            import datetime
+            for i in range(128):
+                from pydicom.dataset import FileDataset, Dataset
+                from pydicom.uid import ExplicitVRLittleEndian
+                
+                file_meta = Dataset()
+                file_meta.MediaStorageSOPClassUID = '1.2.840.10008.5.1.4.1.1.2'
+                file_meta.MediaStorageSOPInstanceUID = f"1.2.826.0.1.3680043.8.498.{volume_id}.{i}"
+                file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+                
+                filename_dcm = dcm_temp / f"synthetic_slice_{i:03d}.dcm"
+                ds = FileDataset(str(filename_dcm), {}, file_meta=file_meta, local_media_storage_sop_class_uid='1.2.840.10008.5.1.4.1.1.2')
+                
+                pat_meta = meta.get("patient_metadata", {})
+                ds.PatientName = pat_meta.get("patient_name", "Anonymous")
+                ds.PatientID = pat_meta.get("patient_id", "N/A")
+                ds.StudyDate = pat_meta.get("study_date", datetime.date.today().strftime('%Y%m%d'))
+                ds.StudyDescription = pat_meta.get("study_description", "Synthetic DICOM Export")
+                ds.SeriesDescription = "3D U-Net Brain Tumor Segmentation (Synthetic)"
+                
+                ds.StudyInstanceUID = f"1.2.826.0.1.3680043.8.498.1.{volume_id}"
+                ds.SeriesInstanceUID = f"1.2.826.0.1.3680043.8.498.2.{volume_id}"
+                ds.SOPInstanceUID = f"1.2.826.0.1.3680043.8.498.3.{volume_id}.{i}"
+                ds.SOPClassUID = '1.2.840.10008.5.1.4.1.1.2'
+                
+                ds.Modality = "MR"
+                ds.ImagePositionPatient = [0.0, 0.0, float(i)]
+                ds.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+                ds.SliceThickness = 1.0
+                ds.PixelSpacing = [1.0, 1.0]
+                
+                ds.Rows = 128
+                ds.Columns = 128
+                ds.BitsAllocated = 16
+                ds.BitsStored = 16
+                ds.HighBit = 15
+                ds.PixelRepresentation = 0
+                
+                label_slice = label[:, :, i]
+                m_label = np.zeros_like(label_slice, dtype=np.uint16)
+                m_label[label_slice == 1] = 80
+                m_label[label_slice == 2] = 160
+                m_label[label_slice == 3] = 240
+                
+                ds.PixelData = m_label.tobytes()
+                ds.save_as(str(filename_dcm))
+                
+        # Zip files
+        with zipfile.ZipFile(export_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for file in dcm_temp.glob("*.dcm"):
+                zipf.write(file, arcname=file.name)
+                
+        # Clean up temp folder
+        shutil.rmtree(dcm_temp)
+        
+        return FileResponse(
+            path=str(export_zip),
+            filename=f"{volume_id}_dicom_segmentation.zip",
+            media_type="application/zip"
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to generate DICOM download for volume {volume_id}: {e}", exc_info=True)
+        return Response(
+            content=json.dumps({"status": "error", "message": f"DICOM Export failed: {e}"}),
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            media_type="application/json"
+        )
+
+
 # API: Get MRI modality slice as PNG image
 @app.get("/api/volume/{volume_id}/slice/{slice_idx}/modality/{modality_idx}")
 async def get_slice_modality(volume_id: str, slice_idx: int, modality_idx: int):
@@ -306,7 +530,7 @@ async def get_slice_modality(volume_id: str, slice_idx: int, modality_idx: int):
 
 # API: Get color-coded transparency PNG for segmentation label
 @app.get("/api/volume/{volume_id}/slice/{slice_idx}/label")
-async def get_slice_label(volume_id: str, slice_idx: int):
+async def get_slice_label(volume_id: str, slice_idx: int, classes: str = "1,2,3"):
     try:
         volume = get_processed_volume(volume_id)
         label = volume["label"] # Shape (128, 128, 128)
@@ -314,15 +538,24 @@ async def get_slice_label(volume_id: str, slice_idx: int):
         # Extract 2D slice
         slice_label = label[:, :, slice_idx]
         
+        # Parse classes parameter (e.g. "1,3" -> [1, 3])
+        try:
+            enabled_classes = [int(c) for c in classes.split(",") if c.strip().isdigit()]
+        except Exception:
+            enabled_classes = [1, 2, 3]
+            
         # Map values to RGBA color mapping
         # 0: background -> transparent (0, 0, 0, 0)
         # 1: edema -> green (0, 255, 0, 150)
         # 2: non-enhancing -> blue (0, 0, 255, 150)
         # 3: enhancing -> red (255, 0, 0, 180)
         rgba = np.zeros((128, 128, 4), dtype=np.uint8)
-        rgba[slice_label == 1] = [0, 255, 0, 150]
-        rgba[slice_label == 2] = [0, 0, 255, 150]
-        rgba[slice_label == 3] = [255, 0, 0, 180]
+        if 1 in enabled_classes:
+            rgba[slice_label == 1] = [0, 255, 0, 150]
+        if 2 in enabled_classes:
+            rgba[slice_label == 2] = [0, 0, 255, 150]
+        if 3 in enabled_classes:
+            rgba[slice_label == 3] = [255, 0, 0, 180]
         
         # Create PIL image
         img = Image.fromarray(rgba, mode="RGBA")
@@ -426,6 +659,16 @@ async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File
     try:
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+            
+        # If the file is a .zip archive, copy it to dicom_sources for future DICOM export
+        if filename.endswith(".zip"):
+            try:
+                backup_dir = Path("./data/dicom_sources")
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy(str(file_path), str(backup_dir / f"{upload_id}.zip"))
+                logger.info(f"Backed up source DICOM zip to ./data/dicom_sources/{upload_id}.zip")
+            except Exception as e:
+                logger.warning(f"Could not back up source DICOM zip: {e}")
     except Exception as e:
         logger.error(f"Failed to save uploaded file: {e}")
         return Response(
@@ -597,6 +840,11 @@ async def process_uploaded_file(upload_id: str, file_path: str):
                 for ch_idx in range(4):
                     if ch_idx not in channel_to_folder:
                         channel_to_folder[ch_idx] = available_folders[ch_idx % len(available_folders)]
+                        
+                # Log warning if missing unique channels
+                unique_folders_mapped = len(set(channel_to_folder.values()))
+                if unique_folders_mapped < 4:
+                    logger.warning(f"Fewer than 4 unique modalities mapped (found {unique_folders_mapped}). Synthesizing missing channels by duplicating available data.")
                 
                 # Parse slices for each channel
                 for ch_idx in range(4):
@@ -826,7 +1074,25 @@ async def reassemble_and_infer(volume_id: str, total_packets: int):
         normalizer = mt.NormalizeIntensity(nonzero=True, channel_wise=True)
         meta_tensor = normalizer(meta_tensor)
     except Exception as e:
-        logger.warning(f"Could not apply intensity normalization: {e}")
+        logger.warning(f"Could not apply intensity normalization via MONAI: {e}")
+        try:
+            logger.info("Applying fallback z-score normalization on non-zero voxels...")
+            for c in range(meta_tensor.shape[0]):
+                ch_data = meta_tensor[c]
+                nonzero_mask = ch_data != 0
+                if nonzero_mask.any():
+                    mean = ch_data[nonzero_mask].mean()
+                    std = ch_data[nonzero_mask].std()
+                    if std > 1e-5:
+                        meta_tensor[c] = torch.where(nonzero_mask, (ch_data - mean) / std, ch_data)
+                    else:
+                        meta_tensor[c] = torch.where(nonzero_mask, ch_data - mean, ch_data)
+                else:
+                    ch_min, ch_max = ch_data.min(), ch_data.max()
+                    if ch_max > ch_min:
+                        meta_tensor[c] = (ch_data - ch_min) / (ch_max - ch_min)
+        except Exception as ex:
+            logger.warning(f"Fallback intensity normalization failed: {ex}")
         
     # Convert to pure torch tensor shape (1, C, H, W, Z)
     if hasattr(meta_tensor, "as_tensor"):
@@ -880,6 +1146,34 @@ async def reassemble_and_infer(volume_id: str, total_packets: int):
         
     total_latency = time.time() - start_time
     
+    # Calculate volumetric statistics
+    edema_voxels = int((pred == 1).sum())
+    non_enhancing_voxels = int((pred == 2).sum())
+    enhancing_voxels = int((pred == 3).sum())
+    total_tumor_voxels = edema_voxels + non_enhancing_voxels + enhancing_voxels
+    
+    # Obtain original pixel dimensions & spacing
+    dx, dy, dz = np.abs(np.diag(affine)[:3])
+    orig_h, orig_w, orig_z = full_array.shape[:3]
+    orig_volume_mm3 = (orig_h * orig_w * orig_z) * (dx * dy * dz)
+    pred_voxel_volume_mm3 = orig_volume_mm3 / (128.0 ** 3)
+    
+    edema_vol_cc = (edema_voxels * pred_voxel_volume_mm3) / 1000.0
+    non_enhancing_vol_cc = (non_enhancing_voxels * pred_voxel_volume_mm3) / 1000.0
+    enhancing_vol_cc = (enhancing_voxels * pred_voxel_volume_mm3) / 1000.0
+    total_vol_cc = edema_vol_cc + non_enhancing_vol_cc + enhancing_vol_cc
+    
+    volumetric_stats = {
+        "edema_voxels": edema_voxels,
+        "edema_volume_cc": edema_vol_cc,
+        "non_enhancing_voxels": non_enhancing_voxels,
+        "non_enhancing_volume_cc": non_enhancing_vol_cc,
+        "enhancing_voxels": enhancing_voxels,
+        "enhancing_volume_cc": enhancing_vol_cc,
+        "total_tumor_voxels": total_tumor_voxels,
+        "total_tumor_volume_cc": total_vol_cc
+    }
+    
     # Extract resized image values for caching and slice visualization
     image_np = input_tensor.squeeze(0).cpu().numpy().astype(np.float32)
     
@@ -891,7 +1185,7 @@ async def reassemble_and_infer(volume_id: str, total_packets: int):
             "study_date": "2026-06-25",
             "study_description": "Simulated Hospital Scan Stream"
         }
-
+ 
     # Save results to disk as compressed numpy archive
     results_path = f"./data/results/{volume_id}.npz"
     Path(results_path).parent.mkdir(parents=True, exist_ok=True)
@@ -907,7 +1201,8 @@ async def reassemble_and_infer(volume_id: str, total_packets: int):
             "resize_time": resize_time,
             "timestamp": time.time(),
             "device": device_used,
-            "patient_metadata": patient_metadata
+            "patient_metadata": patient_metadata,
+            "volumetric_stats": volumetric_stats
         })
     )
     
@@ -932,37 +1227,43 @@ async def reassemble_and_infer(volume_id: str, total_packets: int):
 
 async def consume_kafka_loop(bootstrap_servers: str, topic: str):
     """
-    Main loop consuming slice payloads from the Kafka topic.
+    Main loop consuming slice payloads from the Kafka topic. Retries connection dynamically if offline.
     """
-    logger.info(f"Initializing Kafka Consumer: consuming from topic '{topic}'...")
-    consumer = AIOKafkaConsumer(
-        topic,
-        bootstrap_servers=bootstrap_servers,
-        group_id="mri-inference-workers",
-        value_deserializer=lambda v: json.loads(v.decode("utf-8")),
-        max_partition_fetch_bytes=5242880,
-    )
-    
-    try:
-        await consumer.start()
-        logger.info("Kafka Consumer started successfully!")
-    except KafkaConnectionError as e:
-        logger.warning(f"Could not connect to Kafka at {bootstrap_servers}: {e}")
-        logger.info("FastAPI backend is offline from Kafka. Use REST simulation API trigger.")
-        return
-    except Exception as e:
-        logger.error(f"Failed to start Kafka Consumer: {e}")
-        return
+    global kafka_connected
+    while True:
+        logger.info(f"Initializing Kafka Consumer: consuming from topic '{topic}'...")
+        consumer = AIOKafkaConsumer(
+            topic,
+            bootstrap_servers=bootstrap_servers,
+            group_id="mri-inference-workers",
+            value_deserializer=lambda v: json.loads(v.decode("utf-8")),
+            max_partition_fetch_bytes=5242880,
+        )
         
-    try:
-        async for message in consumer:
-            payload = message.value
-            await process_slice_payload(payload)
-    except Exception as e:
-        logger.error(f"Error in Kafka consumer: {e}")
-    finally:
-        logger.info("Stopping Kafka Consumer...")
-        await consumer.stop()
+        try:
+            await consumer.start()
+            logger.info("Kafka Consumer started successfully!")
+            kafka_connected = True
+            
+            async for message in consumer:
+                payload = message.value
+                await process_slice_payload(payload)
+                
+        except KafkaConnectionError as e:
+            logger.warning(f"Could not connect to Kafka at {bootstrap_servers}: {e}")
+            kafka_connected = False
+        except Exception as e:
+            logger.error(f"Error in Kafka consumer loop: {e}")
+            kafka_connected = False
+        finally:
+            logger.info("Stopping/Cleaning Kafka Consumer...")
+            try:
+                await consumer.stop()
+            except Exception:
+                pass
+                
+        logger.info("Kafka consumer offline. Retrying connection in 10 seconds...")
+        await asyncio.sleep(10)
 
 
 # Mount static files folder pointing to the frontend directory
