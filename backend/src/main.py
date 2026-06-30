@@ -599,34 +599,46 @@ async def get_volume_mesh(volume_id: str):
         volume = get_processed_volume(volume_id)
         label = volume["label"] # Shape (128, 128, 128)
         
-        # Find points where label > 0
-        indices = np.argwhere(label > 0)
+        # Generate boundary voxel shell to reduce payload size using vectorized NumPy slicing
+        active_mask = label > 0
+        if not np.any(active_mask):
+            return {"points": []}
+            
+        padded = np.pad(active_mask, 1, mode='constant', constant_values=False)
+        
+        # Slice padded array in 6 directions
+        x_min = padded[0:-2, 1:-1, 1:-1]
+        x_max = padded[2:,   1:-1, 1:-1]
+        y_min = padded[1:-1, 0:-2, 1:-1]
+        y_max = padded[1:-1, 2:,   1:-1]
+        z_min = padded[1:-1, 1:-1, 0:-2]
+        z_max = padded[1:-1, 1:-1, 2:]
+        
+        has_bg_neighbor = ~(x_min & x_max & y_min & y_max & z_min & z_max)
+        boundary_mask = active_mask & has_bg_neighbor
+        
+        indices = np.argwhere(boundary_mask)
         if indices.size == 0:
             return {"points": []}
             
-        # Generate boundary voxel shell to reduce payload size
-        points = []
-        padded_label = np.pad(label, 1, mode='constant', constant_values=0)
-        
-        for x, y, z in indices:
-            px, py, pz = x + 1, y + 1, z + 1
-            # Check 6-neighborhood for background (0)
-            if (padded_label[px-1, py, pz] == 0 or padded_label[px+1, py, pz] == 0 or
-                padded_label[px, py-1, pz] == 0 or padded_label[px, py+1, pz] == 0 or
-                padded_label[px, py, pz-1] == 0 or padded_label[px, py, pz+1] == 0):
-                
-                # Normalize coords to [-1, 1] relative to center
-                nx = (x - 64.0) / 64.0
-                ny = (y - 64.0) / 64.0
-                nz = (z - 64.0) / 64.0
-                val = int(label[x, y, z])
-                points.append([nx, ny, nz, val])
-                
         # Limit points to 8000 max by downsampling
-        if len(points) > 8000:
-            indices_sample = np.random.choice(len(points), 8000, replace=False)
-            points = [points[idx] for idx in indices_sample]
+        if len(indices) > 8000:
+            indices_sample_idx = np.random.choice(len(indices), 8000, replace=False)
+            indices = indices[indices_sample_idx]
             
+        # Normalize coords to [-1, 1] relative to center
+        nx = (indices[:, 0] - 64.0) / 64.0
+        ny = (indices[:, 1] - 64.0) / 64.0
+        nz = (indices[:, 2] - 64.0) / 64.0
+        
+        # Extract corresponding labels
+        vals = label[indices[:, 0], indices[:, 1], indices[:, 2]]
+        
+        points = [
+            [float(nx[i]), float(ny[i]), float(nz[i]), int(vals[i])]
+            for i in range(len(indices))
+        ]
+        
         return {"points": points}
         
     except FileNotFoundError:
@@ -1187,8 +1199,10 @@ async def reassemble_and_infer(volume_id: str, total_packets: int):
     # Run TorchScript engine inference
     infer_start = time.time()
     if model is not None:
+        is_cuda = (device.type == "cuda")
         with torch.no_grad():
-            outputs = model(input_tensor)
+            with torch.cuda.amp.autocast(enabled=is_cuda):
+                outputs = model(input_tensor)
         inference_time = time.time() - infer_start
         device_used = str(outputs.device)
         
