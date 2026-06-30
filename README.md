@@ -12,17 +12,17 @@ The system operates as a distributed microservices pipeline structured for high 
 
 ```mermaid
 graph TD
-    subgraph Hospital Scanning Server (Ingestion)
+    subgraph "Hospital Scanning Server (Ingestion)"
         NIfTI[Raw .nii.gz / DICOM Zip] -->|nibabel / zip load| Slicer[z-Axis Axial Slicer]
         Slicer -->|numpy tobytes| B64[base64 Encoder]
         B64 -->|packet metadata| Prod[Async Kafka Publisher]
     end
 
-    subgraph Messaging Broker (Kafka Stack)
+    subgraph "Messaging Broker (Kafka Stack)"
         Prod -->|stream slices| Topic[(Kafka: mri-inference-requests)]
     end
 
-    subgraph Distributed Inference Worker (FastAPI & DL)
+    subgraph "Distributed Inference Worker (FastAPI & DL)"
         Topic -->|consume| Cons[Async Kafka Consumer]
         Cons -->|decode & cache| Cache[(In-Memory Slice Cache)]
         Cache -->|reassemble| Stack[3D Array Reassembler]
@@ -33,7 +33,7 @@ graph TD
         Post -->|real-time telemetry| WS[FastAPI WebSocket Server]
     end
 
-    subgraph Visualization & Analytics (Presentation Layer)
+    subgraph "Visualization & Analytics (Presentation Layer)"
         WS -->|telemetry progress| UI[Glassmorphic Web UI Dashboard]
         UI -->|GET slice + plane query| Disk
         UI -->|GET 3D mesh points| Disk
